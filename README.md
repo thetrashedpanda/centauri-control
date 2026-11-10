@@ -28,43 +28,70 @@ A local, self-hosted dashboard for managing Elegoo Centauri 3D printers. Monitor
 - Local network access to Centauri printers
 - TLS certificate (self-signed generated at first startup)
 
-### Installation
+### Installation & Running
+
+**Easiest way** — use the provided development script:
 
 ```bash
 # Clone the repository
 git clone https://github.com/thetrashedpanda/centauri-control.git
 cd centauri-control
 
-# Backend setup
+# Install dependencies
+cd backend && pip install -e '.[dev]' && cd ..
+cd frontend && npm ci && cd ..
+
+# Start both backend and frontend
+./dev.sh
+```
+
+The dashboard will be available at `https://localhost:8443` (backend HTTPS) or `http://localhost:5173` (frontend dev server with proxying).
+
+On first run, you will be prompted to set an admin password at the `/setup` endpoint.
+
+**Note:** If Safari warns about the self-signed certificate, click "Show Details" → "Visit this website" to proceed.
+
+### Manual Setup (If `dev.sh` Doesn't Work)
+
+```bash
+# Terminal 1: Backend
 cd backend
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -e '.[dev]'
+python -m centauricontrol
 
-# Frontend setup (in another terminal)
+# Terminal 2: Frontend (optional, for development)
 cd frontend
 npm ci
-npm run build
-
-# Run the application
-cd ../backend
-python -m centauricontrol
-```
-
-The dashboard will be available at `https://localhost:8443`. On first run, you will be prompted to set an admin password.
-
-### Development
-
-```bash
-# Backend (with auto-reload)
-cd backend
-python -m centauricontrol
-
-# Frontend (with dev server and hot reload)
-cd frontend
 npm run dev
 # The dev server proxies /api, /camera, and /ws to https://127.0.0.1:8443
 ```
+
+### Development
+
+For active development with hot reload:
+
+```bash
+# In one terminal: Backend
+cd backend && python -m centauricontrol
+
+# In another terminal: Frontend dev server
+cd frontend && npm run dev
+```
+
+The frontend dev server (http://localhost:5173) automatically proxies backend requests to `https://127.0.0.1:8443`.
+
+### Production Deployment
+
+For long-term hosting, consider:
+
+- **Docker** — Build a container image and deploy via Docker Compose
+- **systemd** (Linux) — Create a systemd service unit
+- **launchd** (macOS) — Create a LaunchAgent plist
+- **Windows Service** — Use NSSM or similar wrapper
+
+See [DEPLOYMENT.md](./DEPLOYMENT.md) for detailed instructions (coming soon).
 
 ## Configuration
 
