@@ -36,6 +36,7 @@ BCRYPT_ROUNDS: int = 12
 AUTH_ENABLED: bool = os.getenv("AUTH_ENABLED", "true").lower() != "false"
 
 _AUTH_FILE = "auth.json"
+_SESSIONS_FILE = "sessions.json"
 
 # ---------------------------------------------------------------------------
 # Module-level singleton (set by __main__.py via set_auth_manager)
@@ -69,6 +70,7 @@ class AuthManager:
         self._store = store
         # token → Unix epoch expiry (float)
         self._sessions: dict[str, float] = {}
+        self._load_sessions()
 
     # ------------------------------------------------------------------
     # Password management
@@ -156,6 +158,7 @@ class AuthManager:
         """Create a new 30-day session token and return it."""
         token = secrets.token_urlsafe(32)
         self._sessions[token] = time.time() + SESSION_TTL
+        self._save_sessions()
         return token
 
     def validate_session(self, token: str) -> bool:
@@ -168,12 +171,32 @@ class AuthManager:
             return False
         if time.time() > expiry:
             del self._sessions[token]
+            self._save_sessions()
             return False
         return True
 
     def revoke_session(self, token: str) -> None:
         """Remove *token* from the active sessions dict."""
         self._sessions.pop(token, None)
+        self._save_sessions()
+
+    # ------------------------------------------------------------------
+    # Session persistence
+    # ------------------------------------------------------------------
+
+    def _load_sessions(self) -> None:
+        """Load sessions from disk, filtering out expired ones."""
+        record = self._store.read(_SESSIONS_FILE)
+        if not isinstance(record, dict):
+            return
+        now = time.time()
+        for token, expiry in record.items():
+            if isinstance(expiry, (int, float)) and expiry > now:
+                self._sessions[token] = expiry
+
+    def _save_sessions(self) -> None:
+        """Persist active sessions to disk."""
+        self._store.write(_SESSIONS_FILE, self._sessions)
 
 
 # ---------------------------------------------------------------------------
