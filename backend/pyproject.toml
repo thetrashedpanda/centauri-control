@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "centauricontrol"
+version = "2.0.0"
+requires-python = ">=3.12"
+dependencies = ["websockets>=13", "aiomqtt>=2", "bcrypt>=4"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-mock>=3"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["centauricontrol"]

@@ -1,0 +1,126 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg:       #0d0e12;
+  --color-surface:  #16181f;
+  --color-surface2: #1e2028;
+  --color-border:   #2a2d38;
+  --color-accent:   #ff6b2b;
+  --color-muted:    #6b7280;
+  --color-fg:     #e5e7eb;
+}
+
+/* Theme overrides — swapped at runtime via [data-theme] on <html> */
+
+[data-theme="dark"] {
+  --color-bg:       #0d0e12;
+  --color-surface:  #16181f;
+  --color-surface2: #1e2028;
+  --color-border:   #2a2d38;
+  --color-accent:   #ff6b2b;
+  --color-muted:    #6b7280;
+  --color-fg:     #e5e7eb;
+}
+
+[data-theme="light"] {
+  --color-bg:       #f3f4f6;
+  --color-surface:  #ffffff;
+  --color-surface2: #eef0f3;
+  --color-border:   #dcdfe4;
+  --color-accent:   #ff6b2b;
+  --color-muted:    #6b7280;
+  --color-fg:     #16181f;
+}
+
+/* Elegoo Centauri Carbon — matches the printer's onboard touchscreen: dark-grey chassis, green accent */
+[data-theme="elegoo"] {
+  --color-bg:       #26282c;
+  --color-surface:  #2f3136;
+  --color-surface2: #3a3d43;
+  --color-border:   #47494f;
+  --color-accent:   #1fa952;
+  --color-muted:    #9a9da3;
+  --color-fg:       #f2f3f4;
+}
+
+/* Prusa — PrusaSlicer's dark UI grey with classic Prusa orange */
+[data-theme="prusa"] {
+  --color-bg:       #232327;
+  --color-surface:  #313136;
+  --color-surface2: #3a3a40;
+  --color-border:   #46464d;
+  --color-accent:   #ff8000;
+  --color-muted:    #9a9aa0;
+  --color-fg:     #eceef0;
+}
+
+/* Nebula — deep-space violet, because Centauri */
+[data-theme="nebula"] {
+  --color-bg:       #0a0b1a;
+  --color-surface:  #131629;
+  --color-surface2: #1b1f3a;
+  --color-border:   #2c3363;
+  --color-accent:   #9d5cff;
+  --color-muted:    #6f74a8;
+  --color-fg:     #e6e6fa;
+}
+
+html, body, #root {
+  height: 100%;
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+/* react-grid-layout styles */
+.react-grid-layout {
+  position: relative;
+}
+.react-grid-item {
+  transition: all 200ms ease;
+  transition-property: left, top;
+}
+.react-grid-item.cssTransforms {
+  transition-property: transform;
+}
+.react-grid-item.resizing {
+  z-index: 1;
+  will-change: width, height;
+}
+.react-grid-item.react-draggable-dragging {
+  transition: none;
+  z-index: 3;
+  will-change: transform;
+}
+.react-grid-item.dropping {
+  visibility: hidden;
+}
+.react-grid-item .react-resizable-handle {
+  display: none;
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  bottom: 2px;
+  right: 2px;
+  cursor: se-resize;
+  z-index: 4;
+  border-radius: 0 0 8px 0;
+  background:
+    linear-gradient(135deg, transparent 46%, var(--color-muted) 47%, var(--color-muted) 52%, transparent 53%) 9px 9px / 10px 10px no-repeat,
+    linear-gradient(135deg, transparent 46%, var(--color-muted) 47%, var(--color-muted) 52%, transparent 53%) 4px 4px / 10px 10px no-repeat;
+}
+.dashboard-edit-mode .react-grid-item .react-resizable-handle {
+  display: block;
+}
+.react-grid-item .react-resizable-handle:hover {
+  background:
+    linear-gradient(135deg, transparent 46%, var(--color-accent) 47%, var(--color-accent) 52%, transparent 53%) 9px 9px / 10px 10px no-repeat,
+    linear-gradient(135deg, transparent 46%, var(--color-accent) 47%, var(--color-accent) 52%, transparent 53%) 4px 4px / 10px 10px no-repeat;
+}
+.react-grid-placeholder {
+  background: var(--color-accent);
+  opacity: 0.1;
+  border-radius: 8px;
+  transition-duration: 100ms;
+  z-index: 2;
+}
