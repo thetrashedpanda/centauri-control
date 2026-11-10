@@ -2,7 +2,8 @@
 CentauriControl – CC1Connection (SDCP / WebSocket).
 
 Manages a persistent WebSocket connection to an Elegoo Centauri Carbon CC1
-printer using the SDCP v3 protocol.  Reconnects automatically on drop.
+printer using the SDCP v3 protocol.  Reconnects automatically on drop with
+exponential backoff, heartbeat keepalive, and comprehensive logging.
 """
 
 from __future__ import annotations
@@ -10,19 +11,26 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
 from typing import Any
 
 import websockets
 from websockets.asyncio.client import connect as ws_connect
 
 from centauricontrol.config import CC1_PORT
+from centauricontrol.logging_config import get_logger
 from centauricontrol.printers.base import PrinterConnection, StateChangeCallback
 from centauricontrol.printers import sdcp
 
 
-_RECONNECT_DELAY = 5.0   # seconds between reconnect attempts
-_STATUS_INTERVAL = 5.0   # seconds between proactive status polls
-_ATTRS_INTERVAL  = 60.0  # seconds between proactive attrs polls
+_HEARTBEAT_INTERVAL = 10.0   # seconds between heartbeat pings
+_HEARTBEAT_TIMEOUT = 5.0     # seconds to wait for pong before timeout
+_COMMAND_TIMEOUT = 5.0       # seconds to wait for command response
+_STATUS_INTERVAL = 5.0       # seconds between proactive status polls
+_ATTRS_INTERVAL  = 60.0      # seconds between proactive attrs polls
+_INITIAL_RECONNECT_DELAY = 1.0      # seconds for first retry
+_MAX_RECONNECT_DELAY = 60.0          # max seconds between retries
+_FAILURE_THRESHOLD = 3               # consecutive failures before increased backoff
 
 
 class CC1Connection(PrinterConnection):
@@ -40,104 +48,222 @@ class CC1Connection(PrinterConnection):
         super().__init__(printer_id, ip, name, printer_type, access_code, on_state_change)
         self._ws: Any = None   # websockets connection object
         self._last_print_status: int | None = None
+        self._logger = get_logger(f"cc1.{ip}")
+        self._pending_responses: dict[str, asyncio.Future] = {}
+        self._reconnect_delay = _INITIAL_RECONNECT_DELAY
+        self._consecutive_failures = 0
 
     # ------------------------------------------------------------------
     # PrinterConnection interface
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Connect and loop forever, reconnecting on any drop."""
+        """Connect and loop forever, reconnecting on any drop with exponential backoff."""
         while True:
             try:
                 await self._connect_and_run()
             except asyncio.CancelledError:
+                self._logger.info("Cancelled, shutting down")
                 raise
             except Exception as exc:
-                print(f"[CC1:{self.ip}] Connection error: {exc!r}. Retrying in {_RECONNECT_DELAY}s…")
+                self._consecutive_failures += 1
+                self._logger.error(
+                    f"Connection error (attempt {self._consecutive_failures}): {exc!r}. "
+                    f"Retrying in {self._reconnect_delay:.1f}s…"
+                )
             finally:
                 if self.connected:
                     self._set_connected(False)
-            await asyncio.sleep(_RECONNECT_DELAY)
+            
+            await asyncio.sleep(self._reconnect_delay)
+            self._update_reconnect_delay()
 
-    async def send_cmd(self, cmd: int, data: dict[str, Any]) -> None:
-        """Send an SDCP command to the printer via the open WebSocket."""
+    async def send_cmd(self, cmd: int, data: dict[str, Any]) -> dict[str, Any]:
+        """Send an SDCP command to the printer via the open WebSocket.
+        
+        Now with timeout handling and optional response correlation.
+        Retries once on timeout.
+        """
         if self._ws is None:
-            print(f"[CC1:{self.ip}] send_cmd({cmd}) skipped — not connected")
-            return
+            self._logger.warning(f"send_cmd({cmd}) skipped — not connected")
+            return {}
+        
         try:
-            payload = sdcp.make_msg(cmd, data, mainboard_id=self.mainboard_id)
-            await self._ws.send(payload)
+            request_id = str(uuid.uuid4())
+            payload = sdcp.make_msg(cmd, data, mainboard_id=self.mainboard_id, request_id=request_id)
+            
+            self._logger.debug(f"Sending Cmd {cmd} (RequestID: {request_id})")
+            
+            # Create future for response correlation (if request_id present)
+            response_future: asyncio.Future = asyncio.Future()
+            self._pending_responses[request_id] = response_future
+            
+            try:
+                await self._ws.send(payload)
+            except Exception as send_exc:
+                self._pending_responses.pop(request_id, None)
+                self._logger.error(f"send_cmd({cmd}) failed to send: {send_exc!r}")
+                return {}
+            
+            # Wait for response with timeout
+            try:
+                response = await asyncio.wait_for(response_future, timeout=_COMMAND_TIMEOUT)
+                self._logger.debug(f"Received response for Cmd {cmd}")
+                return response
+            except asyncio.TimeoutError:
+                self._pending_responses.pop(request_id, None)
+                self._logger.warning(f"Cmd {cmd} timeout (RequestID: {request_id}); retrying once...")
+                
+                # Single retry
+                try:
+                    response_future = asyncio.Future()
+                    self._pending_responses[request_id] = response_future
+                    await self._ws.send(payload)
+                    response = await asyncio.wait_for(response_future, timeout=_COMMAND_TIMEOUT)
+                    self._logger.info(f"Cmd {cmd} retry succeeded")
+                    return response
+                except Exception as retry_exc:
+                    self._pending_responses.pop(request_id, None)
+                    self._logger.error(f"Cmd {cmd} retry failed: {retry_exc!r}")
+                    return {}
         except Exception as exc:
-            print(f"[CC1:{self.ip}] send_cmd({cmd}) failed: {exc!r}")
+            self._logger.error(f"send_cmd({cmd}) unexpected error: {exc!r}", exc_info=True)
+            return {}
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
+    def _update_reconnect_delay(self) -> None:
+        """Update reconnect delay with exponential backoff."""
+        if self._consecutive_failures >= _FAILURE_THRESHOLD:
+            self._reconnect_delay = min(
+                self._reconnect_delay * 2,  # Double delay
+                _MAX_RECONNECT_DELAY,       # Cap at max
+            )
+        else:
+            self._reconnect_delay = _INITIAL_RECONNECT_DELAY
+
     async def _connect_and_run(self) -> None:
         uri = f"ws://{self.ip}:{CC1_PORT}/websocket"
-        print(f"[CC1:{self.ip}] Connecting to {uri}…")
+        self._logger.info(f"Connecting to {uri}…")
 
-        # ping_interval=None: the printer's embedded WS server does not respond
-        # to protocol-level PING frames, causing spurious disconnects every ~30s.
-        # The periodic status polls below serve as an application-level keepalive.
-        async with ws_connect(uri, open_timeout=10, ping_interval=None) as ws:
-            self._ws = ws
-            self._set_connected(True)
-            print(f"[CC1:{self.ip}] Connected.")
+        try:
+            # ping_interval=None: printer's embedded WS server does not respond
+            # to protocol-level PING frames. We use application-level heartbeat instead.
+            async with ws_connect(uri, open_timeout=10, ping_interval=None) as ws:
+                self._ws = ws
+                self._consecutive_failures = 0  # Reset on successful connect
+                self._reconnect_delay = _INITIAL_RECONNECT_DELAY
+                self._set_connected(True)
+                self._logger.info("Connected")
 
-            await self.send_cmd(sdcp.CMD_ATTRS, {})
-            await self.send_cmd(sdcp.CMD_STATUS, {})
+                await self.send_cmd(sdcp.CMD_ATTRS, {})
+                await self.send_cmd(sdcp.CMD_STATUS, {})
 
-            recv_task = asyncio.create_task(self._recv_loop(ws))
-            poll_task = asyncio.create_task(self._poll_loop())
-            try:
-                done, pending = await asyncio.wait(
-                    [recv_task, poll_task],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for t in pending:
-                    t.cancel()
-                # Re-raise if the recv loop exited with an error
-                for t in done:
-                    t.result()
-            finally:
-                recv_task.cancel()
-                poll_task.cancel()
-
-        self._ws = None
+                recv_task = asyncio.create_task(self._recv_loop(ws))
+                poll_task = asyncio.create_task(self._poll_loop())
+                heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+                try:
+                    done, pending = await asyncio.wait(
+                        [recv_task, poll_task, heartbeat_task],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for t in pending:
+                        t.cancel()
+                    # Re-raise if any task exited with an error
+                    for t in done:
+                        t.result()
+                finally:
+                    recv_task.cancel()
+                    poll_task.cancel()
+                    heartbeat_task.cancel()
+        finally:
+            self._ws = None
 
     async def _recv_loop(self, ws: Any) -> None:
         """Receive messages from the printer indefinitely."""
-        async for raw in ws:
+        self._logger.debug("Receive loop started")
+        try:
+            async for raw in ws:
+                try:
+                    self._handle_message(raw)
+                except Exception as exc:
+                    self._logger.error(f"Message handling error: {exc!r}", exc_info=True)
+        except Exception as exc:
+            self._logger.error(f"Receive loop error: {exc!r}", exc_info=True)
+            raise
+
+    async def _heartbeat_loop(self) -> None:
+        """Send periodic heartbeat pings to detect stale connections."""
+        self._logger.debug("Heartbeat loop started")
+        while True:
             try:
-                self._handle_message(raw)
+                await asyncio.sleep(_HEARTBEAT_INTERVAL)
+                if self._ws is None:
+                    break
+                
+                self._logger.debug("Sending heartbeat ping")
+                try:
+                    await asyncio.wait_for(self._ws.send("ping"), timeout=2.0)
+                except asyncio.TimeoutError:
+                    self._logger.warning("Heartbeat send timed out")
+                    break
+                except Exception as exc:
+                    self._logger.error(f"Heartbeat send failed: {exc!r}")
+                    break
+            except asyncio.CancelledError:
+                break
             except Exception as exc:
-                print(f"[CC1:{self.ip}] Message handling error: {exc!r}")
+                self._logger.error(f"Heartbeat loop error: {exc!r}", exc_info=True)
+                break
 
     async def _poll_loop(self) -> None:
         """Send periodic status/attrs requests as an application-level keepalive."""
+        self._logger.debug("Poll loop started")
         last_attrs = time.monotonic()
-        while True:
-            await asyncio.sleep(_STATUS_INTERVAL)
-            await self.send_cmd(sdcp.CMD_STATUS, {})
-            if time.monotonic() - last_attrs >= _ATTRS_INTERVAL:
-                await self.send_cmd(sdcp.CMD_ATTRS, {})
-                last_attrs = time.monotonic()
+        try:
+            while True:
+                await asyncio.sleep(_STATUS_INTERVAL)
+                await self.send_cmd(sdcp.CMD_STATUS, {})
+                if time.monotonic() - last_attrs >= _ATTRS_INTERVAL:
+                    await self.send_cmd(sdcp.CMD_ATTRS, {})
+                    last_attrs = time.monotonic()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            self._logger.error(f"Poll loop error: {exc!r}", exc_info=True)
+            raise
 
     def _handle_message(self, raw: str | bytes) -> None:
         """Parse an incoming SDCP message and update local state.
 
-        The printer routes messages by ``Topic`` string, matching the same
-        envelope shape used over MQTT for CC2 printers:
-          - "sdcp/status/{id}"     -> top-level "Status" key
-          - "sdcp/attributes/{id}" -> top-level "Attributes" key
-          - "sdcp/response/{id}"   -> "Data.Cmd" / "Data.Data" (command replies)
+        Handles:
+          - Heartbeat pong responses
+          - Status updates (Topic: sdcp/status/{id})
+          - Attribute updates (Topic: sdcp/attributes/{id})
+          - Command responses with RequestID correlation
         """
+        # Handle heartbeat pong
+        if raw == "pong":
+            self._logger.debug("Received heartbeat pong")
+            return
+        
         try:
             msg: dict = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
+            self._logger.warning(f"Failed to parse JSON message: {raw!r}")
             return
+
+        # Check for RequestID in Data section (response correlation)
+        if isinstance(msg.get("Data"), dict):
+            request_id = msg["Data"].get("RequestID")
+            if request_id and request_id in self._pending_responses:
+                future = self._pending_responses.pop(request_id)
+                if not future.done():
+                    self._logger.debug(f"Received response for RequestID {request_id}")
+                    future.set_result(msg.get("Data", {}))
+                return
 
         topic = msg.get("Topic", "")
 

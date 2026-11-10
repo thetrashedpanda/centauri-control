@@ -42,6 +42,7 @@ from centauricontrol.config import (
     WS_PORT,
     ensure_ssl_cert,
 )
+from centauricontrol.logging_config import initialize_logging, get_logger
 from centauricontrol.persistence.store import DataStore
 from centauricontrol.auth.manager import AuthManager, set_auth_manager
 from centauricontrol.printers.registry import PrinterRegistry
@@ -50,25 +51,29 @@ from centauricontrol.printers.registry import PrinterRegistry
 async def main() -> None:
     """Application root coroutine.  Called exactly once via asyncio.run()."""
 
-    # 1. Ensure data directory exists
+    # 1. Initialize logging
+    initialize_logging(log_dir=DATA_DIR / "logs")
+    logger = get_logger(__name__)
+
+    # 2. Ensure data directory exists
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 2. Initialize DataStore
+    # 3. Initialize DataStore
     store = DataStore(DATA_DIR)
 
-    # 3. Initialize AuthManager
+    # 4. Initialize AuthManager
     auth = AuthManager(store)
     set_auth_manager(auth)
 
-    # 4. Log auth status
+    # 5. Log auth status
     if not AUTH_ENABLED:
-        print("[Auth] Authentication disabled (AUTH_ENABLED=false)")
+        logger.info("Authentication disabled (AUTH_ENABLED=false)")
     elif not auth.has_password():
-        print("[Auth] No password configured — first-time setup required at /setup")
+        logger.warning("No password configured — first-time setup required at /setup")
     else:
-        print(f"[Auth] Authentication enabled (user: {auth.get_username()})")
+        logger.info(f"Authentication enabled (user: {auth.get_username()})")
 
-    # 5. Import WebSocket handler now so we can build the broadcast callback.
+    # 6. Import WebSocket handler now so we can build the broadcast callback.
     #    Import is deferred to respect module loading order.
     from centauricontrol.websocket.handler import (
         broadcast_to_browsers,
@@ -88,28 +93,28 @@ async def main() -> None:
     async def _integration_update_callback(status: dict) -> None:
         await broadcast_to_browsers({"type": "integration_update", "status": status})
 
-    # 6. Initialize PrinterRegistry
+    # 7. Initialize PrinterRegistry
     registry = PrinterRegistry(store, on_state_change=_broadcast_callback)
     integrations = IntegrationManager(store, _integration_update_callback)
 
-    # 7. Load saved printers
+    # 8. Load saved printers
     registry.load_saved()
 
-    # 8. Wire registry into WS handler and Spoolman integration
+    # 9. Wire registry into WS handler and Spoolman integration
     ws_set_registry(registry)
     set_integration_status_provider(integrations.statuses)
     spoolman_set_registry(registry)
 
-    # 9. Start printer connection tasks
+    # 10. Start printer connection tasks
     registry.start_all()
     asyncio.create_task(integrations.poll_forever(lambda: [str(p["id"]) for p in registry.all()]))
 
-    # 10. Build HTTP request handler class
+    # 11. Build HTTP request handler class
     handler_class = make_handler_class(store, auth, registry, loop, integrations)
 
     import http.server
 
-    # 11. Require TLS for network access; the HTTP listener only redirects.
+    # 12. Require TLS for network access; the HTTP listener only redirects.
     if not ensure_ssl_cert():
         raise RuntimeError("TLS certificate is required; refusing to start an insecure server")
     try:
@@ -131,10 +136,10 @@ async def main() -> None:
     from centauricontrol.websocket.handler import browser_handler
     from websockets.asyncio.server import serve as ws_serve
 
-    print(f"[CentauriControl] HTTP  → http://localhost:{HTTP_PORT} (redirects to HTTPS)")
-    print(f"[CentauriControl] HTTPS → https://localhost:{HTTPS_PORT}")
-    print(f"[CentauriControl] WSS  → wss://localhost:{WS_PORT}")
-    print("[CentauriControl] Ready.")
+    logger.info(f"HTTP  → http://localhost:{HTTP_PORT} (redirects to HTTPS)")
+    logger.info(f"HTTPS → https://localhost:{HTTPS_PORT}")
+    logger.info(f"WSS  → wss://localhost:{WS_PORT}")
+    logger.info("Ready")
 
     async with ws_serve(
         browser_handler,
@@ -152,4 +157,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n[CentauriControl] Shutting down.")
+        logger = get_logger(__name__)
+        logger.info("Shutting down")
